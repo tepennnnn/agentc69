@@ -1,0 +1,93 @@
+import type { SequenceStatus } from "../plan/types";
+
+export const PROJECT_STATUS_LABELS: Record<string, string> = {
+  new: "New project",
+  ready: "Ready",
+  error: "Needs attention",
+  download: "Downloading",
+  probe: "Reading media",
+  transcribe: "Transcribing",
+  signals: "Analyzing footage",
+  agent: "Editing",
+  rendering: "Rendering",
+  bundling: "Preparing export",
+};
+/** How a project's status reads as a badge. */
+export const STATUS_VARIANT: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
+  ready: "secondary",
+  error: "destructive",
+  new: "outline",
+};
+
+/**
+ * The shapes the home screen offers, by name. Choosing one is a decision about the video
+ * being made; without one the project takes the shape of its first source.
+ */
+export const ASPECTS: Record<string, { width: number; height: number; fps: number }> = {
+  "9:16": { width: 1080, height: 1920, fps: 30 },
+  "4:5": { width: 1080, height: 1350, fps: 30 },
+  "1:1": { width: 1080, height: 1080, fps: 30 },
+  "16:9": { width: 1920, height: 1080, fps: 30 },
+};
+
+
+/**
+ * Status reads as an icon plus its word, never as a colour on its own: four states
+ * told apart by hue alone are four states nobody can tell apart.
+ */
+export const STATUS: Record<SequenceStatus, { label: string }> = {
+  pending: { label: "Pending" },
+  edited: { label: "Edited" },
+  approved: { label: "Approved" },
+  rendered: { label: "Rendered" },
+  rejected: { label: "Rejected" },
+};
+
+
+export const BUSY = new Set(["download", "probe", "transcribe", "signals", "agent", "rendering", "bundling"]);
+
+
+export const STATUSES: SequenceStatus[] = ["pending", "edited", "approved", "rendered", "rejected"];
+
+
+export const FILTERS: Array<{ value: SequenceStatus | "all"; label: string }> = [
+  { value: "all", label: "All" },
+  ...STATUSES.map((value) => ({ value, label: STATUS[value].label })),
+];
+
+/**
+ * The two kinds of thing a recording can become. They are not a list of features: each
+ * one is a `selection.mode` some template on this machine declares, and a template that
+ * declares neither cannot be reached from here.
+ */
+export const MAKES: Array<{ mode: "clips" | "section"; label: string; note: string }> = [
+  { mode: "clips", label: "A pack of clips", note: "Many short videos, one moment each" },
+  { mode: "section", label: "One long video", note: "A section of the recording, kept in order" },
+];
+
+/**
+ * How far a card has to travel before letting go of it decides it: a share of the card's
+ * width, with a floor so a narrow card on a phone still needs a deliberate throw.
+ */
+export const SWIPE = {
+  distance: 0.3,
+  minDistance: 96,
+  /** px/ms. A quick flick decides a card that has not reached the distance. */
+  velocity: 0.6,
+  /** Movement before a press becomes a drag, so a click on the player still plays it. */
+  slop: 8,
+  /** How long a decided card takes to leave. */
+  flyMs: 220,
+};
+
+/**
+ * The speeds a review plays at. Deciding on a clip is a skim, not a watch, so the deck
+ * goes faster than the editor's `PLAYBACK_RATES` and never slower than the video.
+ */
+export const REVIEW_RATES = [1, 2, 3, 4, 8] as const;
+
+/** The two verdicts a swipe gives. Skipping is not one: it leaves the status alone. */
+export const VERDICTS = {
+  approved: { label: "Approve", key: "ArrowRight" },
+  rejected: { label: "Reject", key: "ArrowLeft" },
+} as const;

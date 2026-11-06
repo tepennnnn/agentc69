@@ -1,0 +1,275 @@
+# Rules, glossary and preferences
+
+Three files that make the agent edit the way its owner would, without the owner saying
+so every time. All three live at two levels (`RuleLevel` is `workspace | project`):
+`<workspace>/` applies to every project; `<workspace>/projects/<id>/` adds to it for one
+project and wins on a conflict. A pack is a third source, not a third level: its
+`STYLE.md` and examples are read before the owner's preferences, which win where they
+disagree (see [PACKS.md](./PACKS.md)). The
+panel (**Video → Rules and preferences** in the editor, for a project and a video), the
+**/settings** pages (for the workspace level), the agent tools and the `agentcut rules`
+command read and write the same files.
+
+| File | What it is | Who reads it |
+| --- | --- | --- |
+| `rules/*.json` | A judgement plus an action | Judged by an agent, executed by the host |
+| `glossary.json` | How names are spelled | Recogniser, proofreader, a deterministic fix-up, every agent |
+| `preferences.md` | How the owner likes their videos, in their words | Every agent prompt |
+
+## Creating and editing rules
+
+Workspace → Rules and Video → Rules and preferences use the same rule form.
+**Create a rule** starts with an idea in plain language and example requests; **Create
+manually** opens the same editable draft. An existing rule has **Ask the agent to help
+with this rule** beside its controls. The agent sees the current draft, conversation,
+installed templates, library assets and existing rules. It returns a proposal or asks
+for a missing decision. The workspace/project selection and the observations task
+model preference are honored. It does not save or apply the result.
+
+The draft shows the condition, actual settings, named files, instruction, and scope.
+Common video settings have direct controls; **All video settings** exposes a structured
+patch editor derived from the template schema, including arrays and aspect variants.
+Removing a setting restores template inheritance; changing one preserves all unrelated
+fields. Library image pools can be ordered without writing JSON. Internal IDs are
+generated, and existing IDs remain stable. File-backed instructions are shown as their
+resolved text and saved inline when edited.
+
+**Save rule** calls the existing registry service in both interfaces. Failed saves keep
+the draft, warnings remain visible, and deletion requires confirmation. Saving is not
+retroactive: existing videos keep their edits. An instruction supplies guidance to the
+agent; automatic settings run when rules are applied. Applying rules to the current
+video remains in the editor's rule panel.
+
+`rules.draft` accepts `text`, an optional `current` rule, and optional `history` turns
+(`role: user | assistant`, `text`); it returns `{ rule, message }`, with `rule: null`
+when clarification is needed. The workspace HTTP action calls the same service without
+a project. The agent's isolated run files are removed after reading the proposal.
+Validation uses the existing template merge function, not a second application model.
+
+## Rules
+
+```json
+{
+  "id": "gameplay-clean",
+  "name": "Gameplay stays clean",
+  "when": "the clip is gameplay footage",
+  "stage": "edit",
+  "priority": 10,
+  "then": {
+    "template": "talking-head",
+    "overrides": { "images": { "mode": "off" } },
+    "prompt": "Never cover the game with pictures."
+  }
+}
+```
+
+- **`when`** is a sentence. An agent reads it against the material and says whether it
+  holds, with a reason. A person reads it in the panel and can tick it by hand.
+- **`stage`** says where it applies. `select` rules shape which clips the selection agent
+  picks; `edit` rules shape how a video is edited; `both` do both.
+- **`then`** is structured and needs no model. `template` names the template to apply;
+  `overrides` is the same field-level patch `template.apply` takes; `slots` fills that
+  template's named inputs — the end card this channel finishes on, the bed it plays
+  under everything — so a rule can name *your* asset rather than only someone else's;
+  `prompt` (or `promptFile`, a markdown file in the same folder) is a standing
+  instruction for the agent. Anything that changes the timeline goes through `template.apply`, so a rule is an
+  ordinary template application with the rules that chose it in its `by` marker:
+  `template:talking-head/rule:gameplay-clean,stream-outro`. Re-applying a template or
+  the rules replaces that work and leaves hand edits alone, exactly as before.
+- **What a rule may not be.** A rule that acts — names a template, an override or a
+  slot — at the `select` stage is refused: those are applied to clips, and at selection
+  there are none yet (a `select` rule may still carry a prompt) — written
+  that way it saved happily and did nothing for ever after. So is a rule whose
+  `promptFile` is not in the rules folder, which used to be worse than useless: the file
+  was written, dropped from the list on the next read with a line on the console, and the
+  save that wrote it then failed with "Rule not found", blaming the wrong thing.
+
+  Two more are said rather than refused, because a rule can arrive with a pack before the
+  template it names: an override naming a section the template has not got, and a slot id
+  the template does not offer — a typo in either is otherwise silent, and the end card
+  the rule exists to add simply never arrives. A rule with nothing in `then` is also
+  worth a word: it matches videos and tags them, and changes nothing. All three come back
+  from `rules.save` as `warnings`, which the panel shows and an agent reads.
+
+- **Conflicts:** lower `priority` runs first. The first matched rule naming a template
+  wins; every matched rule's overrides merge in that order; prompts accumulate. A slot
+  is one value rather than a patch, so a later rule replaces it whole, and a slot the
+  caller passes to `rules.apply` wins over every rule's — the caller is the more
+  specific of the two. A rule that only fills a slot still changes the timeline.
+
+```json
+{
+  "id": "stream-outro",
+  "name": "Every clip ends on the stream card",
+  "when": "the clip was cut from a stream",
+  "then": { "template": "stream-short", "slots": { "endcard": { "assetId": "a_1234abcd" } } }
+}
+```
+
+  A rule can also switch on part of whatever template the video gets, without naming
+  one. The stream kit opens every stream clip on the viewer comment it answers this way:
+
+```json
+{
+  "id": "stream-comment",
+  "name": "Stream clips open on the comment they answer",
+  "when": "the clip was cut from a stream recording",
+  "stage": "edit",
+  "priority": 30,
+  "then": { "overrides": { "comment": { "enabled": true } } }
+}
+```
+
+  Both rule editors — **Video → Rules and preferences** in the editor and the Rules page
+  in /settings — show the chosen template's own slots and fill them from the library, so
+  this is a pair of dropdowns rather than an asset id typed by hand. Only library assets
+  are offered: a rule outlives the project it was written in, and a project's own asset
+  would be a dangling reference everywhere else.
+
+- **`subject`** is optional and names a glossary entry the rule is about.
+
+### When rules run
+
+- **At generation.** The selection agent gets `rules.json`, judges every edit-stage rule
+  per clip and writes the matched ids into `clips.json`. After the clips are published
+  the host executes them clip by clip, promoting each clip in place; a failure is logged
+  and the clip is left as generated. Run on twenty minutes of a real stream through the
+  job the home screen starts, that came back as four videos, each framed by the rule's
+  template, each ending on the card the rule names, at the loudness the template asks
+  for — and the checks the export was read back with all passed.
+- **On request.** In the editor, **Which rules hold?** runs `rules.evaluate`, an agent
+  judgement that returns matches with reasons and a few tags for the video. Tick or untick,
+  then **Apply checked rules** runs `rules.apply`. Both are tools the agent can call too.
+- **During ordinary agent edits** the rules are constraints in the prompt, not re-executed:
+  running twenty rules on "move the title" would be slow and would overwrite work.
+
+### Tools
+
+| Tool | Behaviour |
+| --- | --- |
+| `rules.list`, `rules.get`, `rules.schema` | What applies to this project, with each rule's level and resolved prompt text |
+| `rules.save`, `rules.delete` | Write at `workspace` (default) or `project` level |
+| `rules.evaluate` | Agent judgement: `{ matches: [{ id, reason, rule }], tags, unknown }` |
+| `rules.apply` | Execute rule ids on a video: template choice, merged overrides, `expectedRevision` |
+| `glossary.get`, `glossary.save` | The merged glossary; save writes one level |
+| `preferences.get`, `preferences.set` | Both levels' text; set writes one level |
+
+A rule's inputs travel with it wherever the rule is executed: `rules.apply`, and the plan
+path (`plan.apply`, and `all: true` across a project), which reads the matched rules for
+their template and their overrides and would otherwise apply the one without the other.
+
+`rules.apply` needs a template to apply overrides to. It takes the matched rules' choice,
+then `templateId` from the request, then the template already on the video, then the
+best-scoring suggestion. Rules that only add a prompt change nothing on the timeline and
+say so.
+
+## Glossary
+
+```json
+{ "terms": [ { "term": "Claude", "aliases": ["clod", "cloud AI"], "note": "Anthropic's model" } ] }
+```
+
+Names reach the recogniser as a vocabulary hint (names only, which read the same in any
+language; `AGENTCUT_WHISPER_PROMPT` still overrides), the proofreader as a list to spell
+exactly, and a final pass that rewrites aliases on word boundaries. A term with capitals
+also fixes its own lowercase. Two-word aliases are fixed in segment text only, because
+merging two timed words would move the captions. Every agent gets `glossary.json` and is
+told to use these spellings in titles, captions and hooks.
+
+## Preferences
+
+Plain markdown. The workspace file goes into every prompt under "The owner's preferences"
+("In general"); a project's file is added under "For this project". A pack's `STYLE.md`
+and its examples come before that block, and the block says the owner's preferences win
+where they disagree. So a prompt reads, weakest first: pack `STYLE.md` < workspace
+`preferences.md` < project preferences < the matched rules' own instructions, which are
+standing instructions for the one video being edited. It is the owner's own text, so it
+is not wrapped as untrusted the way transcripts are.
+
+## Observations
+
+Corrections are noted without asking. When a person changes, removes, moves or re-times
+something an agent, rule or template placed, fixes a caption word, or reframes a shot a
+template framed — the one a re-apply writes over, so noticing it matters more — one line
+goes into the observation bank (`observations` table, across every project). Only the web editor's
+own edits count: an agent's edits are not corrections, and work created from scratch is
+not either. Every agent run receives the recent lines as soft context.
+
+The framing line is the named case. Moving the seam of a split layout a template framed
+is written as `Reframed "<clip>": the seam moved from 68% to 74%`, because the next
+re-apply puts the seam back where the template says: the correction cannot survive on
+the clip, so one repeated across clips points at the template, and the review proposes
+changing that rather than a rule per video.
+
+**Review my preferences** (Preferences tab) hands the bank to an agent, which proposes
+rules, glossary entries and preference lines. Each proposal is saved only when accepted.
+Tools: `observations.read`, `observations.review`.
+
+## Why is this here
+
+Every edit carries `by`. Templates write `template:<id>`, a plan adds `/plan`, rules add
+`/rule:<ids>`, an editing agent writes `agent:<messageId>` — the turn of the conversation
+that asked for it — and the clip selection writes `select` for the draft it makes while
+cutting a clip out of a recording, which a template then replaces rather than stacks. Hover an effect on the timeline or open it in the inspector
+to read it in words.
+
+## Command line
+
+```
+agentcut rules list [projectId]
+agentcut rules evaluate PROJECT_ID --sequence SEQ
+agentcut rules apply PROJECT_ID gameplay-clean,stream-outro --sequence SEQ
+agentcut rules glossary
+agentcut rules preferences
+```
+
+## Where they live on screen
+
+Everything that belongs to the person rather than to a project lives in one shell
+(decision 130): a glass header and a rail, reached from the home header's **Library** and
+**Settings**. What each section holds is written under its name in the rail, so "where
+did I put that" is answered before anything is opened. Eight sections, one subject each:
+
+| Section | Address | What you do there |
+| --- | --- | --- |
+| Library | `/library` | Images, sounds and reusable video for every project; where each file came from; deleting one deletes its file (decision 136). |
+| You | `/settings` | The profile (decision 131): the interview's answers editable in place with **Rewrite my preferences**, `preferences.md` in your words, the section the interview wrote (removable apart from your lines), and the observation bank with **Review my preferences**. |
+| Rules | `/settings/rules` | The list for every project: create, edit, reorder, switch one off without deleting it, delete; which pack brought a rule. |
+| Glossary | `/settings/glossary` | Every name, its mishearings and one line of what it is; a name given a look is a subject (decisions 48, 132), filterable on its own. |
+| Packs | `/settings/packs` | What is installed and where from; import and export as full flows; each pack has its own page with what it brought, its style guide, its references and what correct looks like (decision 133). |
+| Templates | `/settings/templates` | Every layout on this machine — built in, yours, a pack's — with its schematic, what it asks to be chosen, and delete for yours (decision 134). |
+| Agents | `/settings/agents` | Which harnesses this machine has, the default harness and model, and the model per kind of work (decision 50). |
+| This machine | `/settings/machine` | Where the workspace is on disk, transcription on import, the stream chat database, and the keys for the optional picture providers (decision 135). |
+
+`/settings/preferences` and `/settings/subjects` still work: they land on You and on the
+glossary's subjects.
+
+Rules at project level stay in the editor, under **Video → Rules and preferences**,
+beside the video they are about; the panel evaluates and applies them per video, but a
+rule is stored at one of the two levels only. A sequence level is planned, not built.
+Every control in the shell calls the same tool an agent calls — `rules.save`,
+`rules.delete`, `glossary.save`, `preferences.set`, `onboarding.*`, `agents.select`,
+`providerkeys.set`, `packs.*`, `templates.delete`, `media.transcription.set`,
+`chat.setSource`, `assets.delete` — so there is no settings-only way to write any of
+these files.
+
+A provider key is the one thing neither interface can read. `providerkeys.list` answers
+whether a key is set and whether the value came from settings or from the environment;
+nothing returns the key itself, to the page or to an agent, and nothing puts one in
+`process.env`, which every spawned harness inherits. Keys are write-only: This machine
+shows set or unset and the origin (settings or the environment), a field
+that replaces the value, and **Clear** for a key saved in settings; there is no reveal
+and no masked tail, and a key answered by an environment variable is not clearable there.
+
+## Not yet
+
+Project-level tags set by hand are still the next milestone in
+[AGENT-FIRST.md](./AGENT-FIRST.md). Adding an asset at the start or end of a video from
+a rule — an outro, a sting — is done: it is a template bookend, and the rule either
+overrides `outro` directly or fills the `video` slot the template declares.
+
+Two gaps the workspace shell did not close. A subject has no assets of its own: a library
+image named after it is still found by name, which is how the picture search has always
+worked. And the workspace-level tools are still bound to a project id the way every other
+editor tool is, so a terminal agent on a machine with no project yet can set a key, run
+the interview or choose a model, but not write a workspace rule.

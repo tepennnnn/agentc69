@@ -1,0 +1,24 @@
+{
+  "name": "agentcut-monorepo",
+  "version": "0.0.0",
+  "private": true,
+  "description": "AgentCut: the CLI, the studio, the renderer and the website, in one workspace.",
+  "scripts": {
+    "dev": "pnpm --filter @agentcut/studio dev",
+    "build": "pnpm --filter @agentcut/studio build",
+    "start": "pnpm --filter @agentcut/studio start",
+    "agentcut": "tsx packages/cli/src/bin.ts",
+    "test": "pnpm --filter @agentcut/core test && pnpm --filter @agentcut/studio test && pnpm --filter agentcut test && pnpm --filter @agentcut/web test",
+    "test:render": "pnpm --filter @agentcut/core test:render",
+    "publishing:worker": "tsx packages/cli/src/commands/publishing-runner.ts",
+    "release:build": "node scripts/release/build.mjs",
+    "release:publish": "node scripts/release/publish.mjs"
+  },
+  "devDependencies": {
+    "@agentcut/core": "workspace:*",
+    "@types/node": "^26.6.0",
+    "tsx": "^4.23.13",
+    "typescript": "^5"
+  },
+  "packageManager": "pnpm@11.9.0"
+}

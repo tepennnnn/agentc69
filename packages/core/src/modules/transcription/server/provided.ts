@@ -1,0 +1,335 @@
+import fs from "node:fs/promises";
+import { existsSync, openSync, readSync, closeSync, readFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { q } from "../../../common/server/db";
+import { projectDir } from "../../../common/server/config";
+import { extractAudio, probe } from "../../media/server/ffmpeg";
+import { isUrl } from "../../../common/lib/urls";
+import { readEditor } from "../../editor/server/store";
+import { Transcript, fmt, type Segment, type Word } from "../lib/transcript";
+import { isProvided, parseTranscript, providedEngine, wordsAcross } from "../lib/import";
+import { HEAR_MAX_SEC, HEAR_MIN_SEC, HEAR_PAD_SEC, HEARD_WITH, PROVIDED_RECORD } from "../data";
+import type { ProvidedTranscript, SourceTranscriptState } from "../types";
+import { inOrder, speechRunsFromWav, spreadOverSpeech, timeFromHeard, type SpeechRun } from "./align";
+import { recogniserFor, vocabularyOf, writeTranscript, type Recogniser } from "./transcribe";
+
+/**
+ * A transcript the person already has, made the project's words.
+ *
+ * It is written where the recogniser's would be — `transcript.json` in the project, or
+ * under `transcripts/<mediaId>/` for imported media — with a `provided:<format>`
+ * engine, so everything that reads words (clip selection, captions, silence cuts, the
+ * editing agent) reads it without knowing where it came from, and `ensureTranscript`
+ * returns it instead of running whisper. The file as it was handed over is kept next
+ * to it, with a record of its name and how finely it was timed.
+ */
+
+export type ImportTranscriptOptions = {
+  text: string;
+  /** The file's name as it was handed over; its extension settles an ambiguous format. */
+  name?: string;
+  /** Imported media to attach it to. Omitted, or the project's own source, means the source. */
+  mediaId?: string;
+  by?: string;
+  onLog?: (text: string) => void;
+};
+
+type Target = { dir: string; file: string | null; mediaId: string | null; label: string };
+
+/** Jobs that read or write the transcript while they run. An editing turn does neither. */
+const READERS = new Set(["analyze", "transcribe", "batch"]);
+
+async function mediaDir(projectId: string, mediaId: string) {
+  const { mediaTranscriptDir } = await import("./media");
+  return mediaTranscriptDir(projectId, mediaId);
+}
+
+async function target(projectId: string, mediaId?: string): Promise<Target> {
+  const project = q.getProject(projectId);
+  if (!project) throw new Error("Project not found");
+  const source = { dir: projectDir(projectId), file: isUrl(project.source_path) ? null : project.source_path, mediaId: null, label: "the source" };
+  if (!mediaId || mediaId === "primary_source") return source;
+  const media = readEditor(projectId).edl.media.find((m) => m.id === mediaId);
+  if (!media) throw new Error("Media not found");
+  return { dir: await mediaDir(projectId, media.id), file: media.file, mediaId: media.id, label: media.name };
+}
+
+/**
+ * Words for a file that is timed only per line: each line's words are laid over the
+ * speech the sound shows inside it, by the same placement whisper's words get. With no
+ * sound to read — a link not downloaded yet, a file ffmpeg cannot decode — they are
+ * spread across the line, which is still inside the right second.
+ */
+async function fitWords(segments: Segment[], file: string | null, dir: string, onLog?: (text: string) => void): Promise<Word[]> {
+  let runs: SpeechRun[] = [];
+  if (file) {
+    try {
+      runs = await speechRunsFromWav(await extractAudio(file, path.join(dir, "audio.wav")));
+    } catch (error) {
+      onLog?.(`could not read the sound (${(error as Error).message}); words are spread across each line`);
+    }
+  }
+  const words: Word[] = [];
+  let from = 0;
+  for (const seg of segments) {
+    // Lines are in order, so a run that ended before this one starts is behind all the rest.
+    while (from < runs.length && runs[from].end <= seg.start) from++;
+    let to = from;
+    while (to < runs.length && runs[to].start < seg.end) to++;
+    words.push(...spreadOverSpeech(wordsAcross(seg.text, seg.end - seg.start), seg, runs.slice(from, to)));
+  }
+  return words;
+}
+
+type Span = { start: number; end: number };
+
+/** Spans in order, with any that overlap — or sit within `gap` of each other — made one. */
+function joined(spans: Span[], gap = 0): Span[] {
+  const out: Span[] = [];
+  for (const span of spans.filter((s) => s.end > s.start).sort((a, b) => a.start - b.start)) {
+    const last = out[out.length - 1];
+    if (last && span.start <= last.end + gap) last.end = Math.max(last.end, span.end);
+    else out.push({ start: span.start, end: span.end });
+  }
+  return out;
+}
+
+/** What of `spans` lies outside `covered`, which is in order. */
+function uncovered(spans: Span[], covered: Span[]): Span[] {
+  const out: Span[] = [];
+  for (const span of spans) {
+    let from = span.start;
+    for (const c of covered) {
+      if (c.end <= from || c.start >= span.end) continue;
+      if (c.start > from) out.push({ start: from, end: c.start });
+      from = Math.max(from, c.end);
+    }
+    if (from < span.end) out.push({ start: from, end: span.end });
+  }
+  return out;
+}
+
+/** A span cut into pieces of at most `max` seconds. */
+const pieces = (span: Span, max: number): Span[] => {
+  const count = Math.ceil((span.end - span.start) / max);
+  const size = (span.end - span.start) / count;
+  return Array.from({ length: count }, (_, i) => ({ start: span.start + i * size, end: i === count - 1 ? span.end : span.start + (i + 1) * size }));
+};
+
+async function readRecord(dir: string): Promise<ProvidedTranscript | null> {
+  return fs.readFile(path.join(dir, PROVIDED_RECORD), "utf8").then((text) => JSON.parse(text) as ProvidedTranscript, () => null);
+}
+
+/**
+ * The words of the stretches a timeline uses, at the times they are heard.
+ *
+ * A file timed per line only says when each line starts — Restream's to the second — and
+ * `fitWords` spreads the line's words over the speech inside it by their length. Inside a
+ * long line with a pause in it, that puts words a second or two from where they are said,
+ * and a karaoke caption shows it: the phrase is up and waiting long before it is spoken.
+ * So wherever the words are used, the recogniser listens to that stretch and every word it
+ * also heard takes the time it heard it at (`timeFromHeard`). What was said stays the
+ * person's; only when it was said is taken from the sound.
+ *
+ * Listening costs a recogniser run, so only the stretches asked for are heard, and the
+ * record remembers them so none is heard twice. A file that timed every word, and a
+ * transcript the recogniser made, come back as they are. Best effort: without whisper, or
+ * when a run fails, the words not heard keep the times their lines gave them.
+ */
+export async function timeProvidedWords(o: {
+  dir: string;
+  file: string | null;
+  transcript: Transcript;
+  spans: Span[];
+  projectId?: string;
+  recognise?: Recogniser;
+  onLog?: (text: string) => void;
+}): Promise<Transcript> {
+  if (!o.file || isUrl(o.file) || !isProvided(o.transcript.engine)) return o.transcript;
+  const record = await readRecord(o.dir);
+  if (record?.timing !== "segments") return o.transcript;
+  const before = record.heardWith === HEARD_WITH ? joined(record.timed ?? []) : [];
+  // Stretches a few seconds apart are heard as one; a stretch already heard is never in one.
+  const pending = uncovered(joined(o.spans, 2 * HEAR_PAD_SEC), before)
+    .filter((span) => span.end - span.start >= HEAR_MIN_SEC)
+    .flatMap((span) => pieces(span, HEAR_MAX_SEC));
+  if (!pending.length) return o.transcript;
+
+  let recognise: Recogniser;
+  try { recognise = await recogniserFor(o.recognise); }
+  catch (error) {
+    o.onLog?.(`${(error as Error).message}; the words keep the times their lines gave them`);
+    return o.transcript;
+  }
+  const { readGlossary } = await import("../../rules/server/glossary");
+  const prompt = vocabularyOf(await readGlossary(o.projectId));
+
+  let words = o.transcript.words;
+  const heard = [...before];
+  const scratch = await fs.mkdtemp(path.join(os.tmpdir(), "agentcut-heard-"));
+  try {
+    for (const span of pending) {
+      // Listen a little past either end, for the words their line placed just outside —
+      // but never into a stretch already heard, whose words are where they belong.
+      const from = Math.max(span.start - HEAR_PAD_SEC, ...heard.filter((h) => h.end <= span.start).map((h) => h.end), 0);
+      const to = Math.min(span.end + HEAR_PAD_SEC, ...heard.filter((h) => h.start >= span.end).map((h) => h.start));
+      const wav = await extractAudio(o.file, path.join(scratch, "heard.wav"), { start: from, duration: to - from });
+      // Heard whole: a clip's stretch is talking, not the hours of nothing VAD is for,
+      // and whole, the recogniser's times are the source's own and need no estimate.
+      const listened = (await recognise(wav, { outDir: scratch, prompt, vad: false })).words
+        .map((w) => ({ ...w, t: w.t + from }))
+        .filter((w) => w.t >= from && w.t < to);
+      const at = words.flatMap((w, i) => (w.t >= from && w.t < to ? [i] : []));
+      const timed = timeFromHeard(at.map((i) => words[i]), listened);
+      const placed = new Map(at.map((i, k) => [i, timed[k]]));
+      words = words.map((w, i) => placed.get(i) ?? w);
+      heard.push(span);
+    }
+  } catch (error) {
+    o.onLog?.(`could not hear every stretch (${(error as Error).message}); the words not heard keep the times their lines gave them`);
+  } finally {
+    await fs.rm(scratch, { recursive: true, force: true });
+  }
+  if (heard.length === before.length) return o.transcript;
+
+  const transcript = { ...o.transcript, words: inOrder(words) };
+  await writeTranscript(path.join(o.dir, "transcript.json"), transcript);
+  await fs.writeFile(path.join(o.dir, PROVIDED_RECORD), JSON.stringify({ ...record, timed: joined(heard), heardWith: HEARD_WITH } satisfies ProvidedTranscript));
+  const count = heard.length - before.length;
+  o.onLog?.(`timed the words of ${count} stretch${count === 1 ? "" : "es"} against the audio`);
+  return transcript;
+}
+
+/**
+ * Parse, time and write a provided transcript into `dir`. No project needed: the
+ * command line calls this for a video it clips without one.
+ */
+export async function writeProvidedTranscript(o: { text: string; name?: string; file: string | null; dir: string; by?: string; projectId?: string; onLog?: (text: string) => void }) {
+  const durationSec = o.file ? await probe(o.file).then((meta) => meta.durationSec).catch(() => undefined) : undefined;
+  const parsed = parseTranscript(o.text, { name: o.name, durationSec });
+  const lastStart = Math.max(parsed.words.at(-1)?.t ?? 0, parsed.segments.at(-1)?.start ?? 0);
+  if (durationSec && lastStart > durationSec + 5) {
+    throw new Error(`This transcript runs to ${fmt(lastStart)} but the video is ${fmt(durationSec)} long. Is it the transcript of this video?`);
+  }
+
+  await fs.mkdir(o.dir, { recursive: true });
+  const timing = parsed.words.length ? "words" : "segments";
+  const words = parsed.words.length ? parsed.words : await fitWords(parsed.segments, o.file, o.dir, o.onLog);
+  // What was said is theirs; how the channel's names are spelled is theirs too. The
+  // owner's glossary — deterministic, their own — is the one pass a provided transcript
+  // gets: a service that heard "Cloud" for "Claude" seventy times is still the source of
+  // truth for everything else. The proofreading model never touches it.
+  const { readGlossary, applyGlossary } = await import("../../rules/server/glossary");
+  const spelled = applyGlossary(Transcript.parse({
+    language: parsed.language ?? "und",
+    engine: providedEngine(parsed.format),
+    segments: parsed.segments,
+    words,
+  }), await readGlossary(o.projectId));
+  const transcript = spelled.transcript;
+  if (spelled.changed) o.onLog?.(`glossary corrected ${spelled.changed} words`);
+
+  const record: ProvidedTranscript = {
+    name: o.name?.trim() || `transcript.${parsed.format === "lines" ? "txt" : parsed.format}`,
+    format: parsed.format,
+    timing,
+    words: transcript.words.length,
+    segments: transcript.segments.length,
+    at: Date.now(),
+    by: o.by ?? "",
+  };
+  await removeProvidedFiles(o.dir);
+  await fs.writeFile(path.join(o.dir, `transcript.original${path.extname(record.name) || ".txt"}`), o.text);
+  await writeTranscript(path.join(o.dir, "transcript.json"), transcript);
+  await fs.writeFile(path.join(o.dir, PROVIDED_RECORD), JSON.stringify(record));
+
+  const covered = durationSec && transcript.words.length ? (transcript.words.at(-1)!.t - transcript.words[0].t) / durationSec : 1;
+  o.onLog?.(
+    `${record.name}: ${record.words} words in ${record.segments} lines` +
+      (timing === "segments" ? ", timed per line and fitted to the speech" : ", timed per word") +
+      (covered < 0.5 ? ` — it covers only ${Math.round(covered * 100)}% of the video` : ""),
+  );
+  return { transcript, record };
+}
+
+async function removeProvidedFiles(dir: string) {
+  const files = await fs.readdir(dir).catch(() => [] as string[]);
+  await Promise.all(files
+    .filter((file) => file === PROVIDED_RECORD || file.startsWith("transcript.original."))
+    .map((file) => fs.rm(path.join(dir, file), { force: true })));
+}
+
+/**
+ * Make a transcript the person has the words of the source (or of one imported media),
+ * and put those words on everything already cut from it.
+ */
+export async function importTranscript(projectId: string, o: ImportTranscriptOptions) {
+  const where = await target(projectId, o.mediaId);
+  const job = q.activeJob(projectId);
+  if (job && READERS.has(job.kind)) throw new Error(`A ${job.kind} job is reading this project's words; add the transcript when it finishes`);
+
+  // What the timeline's words came from until now: a shot that no longer matches it was
+  // corrected by hand and keeps its words (`freshWords`).
+  const previous = await fs.readFile(path.join(where.dir, "transcript.json"), "utf8")
+    .then((text) => Transcript.safeParse(JSON.parse(text)))
+    .then((parsed) => (parsed.success ? parsed.data : null), () => null);
+  const { record } = await writeProvidedTranscript({ text: o.text, name: o.name, file: where.file, dir: where.dir, by: o.by, projectId, onLog: o.onLog });
+
+  // The words go onto the timeline through the paths that already do it for the
+  // recogniser's: they read the transcript just written, so there is one way words land.
+  let patched = 0;
+  const { transcribeProjectMedia, transcribingNow } = await import("./media");
+  if (where.mediaId && transcribingNow(projectId).has(where.mediaId)) {
+    // The recogniser already listening to this media keeps the provided transcript
+    // when it finishes, and puts those words on the timeline itself.
+    o.onLog?.(`${where.label} is still being recognised; your words replace its words when that run ends`);
+  } else if (where.mediaId) {
+    const done = await transcribeProjectMedia(projectId, { mediaIds: [where.mediaId], by: o.by, previous, onLog: o.onLog });
+    patched = done.results[0]?.items ?? 0;
+  } else if (where.file && q.getProject(projectId)?.edl) {
+    const { resyncTranscript } = await import("./resync");
+    patched = (await resyncTranscript(projectId, { reuse: true, previous, onLog: o.onLog })).patched;
+  }
+  // Before the first analysis a project has no edit list yet: nothing is cut from the
+  // source, and the transcript is simply what that analysis will read.
+  return { ...record, engine: providedEngine(record.format), target: where.mediaId ?? "source", patched, revision: q.getProject(projectId)?.edl ? readEditor(projectId).revision : null };
+}
+
+/**
+ * Stop treating a provided transcript as the words. The next analysis or transcription
+ * runs the recogniser; the words already on clips stay until it does, because an
+ * empty caption track is worse than the last words anybody trusted.
+ */
+export async function discardTranscript(projectId: string, o: { mediaId?: string } = {}) {
+  const where = await target(projectId, o.mediaId);
+  if (!existsSync(path.join(where.dir, PROVIDED_RECORD))) {
+    throw new Error(`${where.label} has no transcript you provided; its words came from the recogniser`);
+  }
+  await removeProvidedFiles(where.dir);
+  await fs.rm(path.join(where.dir, "transcript.json"), { force: true });
+  if (where.mediaId) {
+    const { forgetTranscription } = await import("./media");
+    forgetTranscription(projectId, where.mediaId);
+  }
+  return { target: where.mediaId ?? "source", revision: q.getProject(projectId)?.edl ? readEditor(projectId).revision : null };
+}
+
+/**
+ * Where the source's words come from. Synchronous and cheap, because both interfaces
+ * poll it: the record is a few bytes, and a recognised transcript is only read far
+ * enough to find its engine — a five-hour one is megabytes.
+ */
+export function sourceTranscriptState(projectId: string): SourceTranscriptState {
+  const dir = projectDir(projectId);
+  try {
+    const record = JSON.parse(readFileSync(path.join(dir, PROVIDED_RECORD), "utf8")) as ProvidedTranscript;
+    return { status: "provided", engine: providedEngine(record.format), ...record };
+  } catch { /* none provided */ }
+  const file = path.join(dir, "transcript.json");
+  if (!existsSync(file)) return { status: "none" };
+  const head = Buffer.alloc(256);
+  const fd = openSync(file, "r");
+  try { readSync(fd, head, 0, head.length, 0); } finally { closeSync(fd); }
+  return { status: "recognised", engine: /"engine":"([^"]*)"/.exec(head.toString("utf8"))?.[1] ?? "" };
+}

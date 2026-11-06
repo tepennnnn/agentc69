@@ -1,0 +1,36 @@
+// agentcut.dev: the landing page and the packs marketplace.
+// The database is Postgres on the owner's server, reached through Hyperdrive. Local dev runs
+// the worker in miniflare against PGlite (scripts/dev.mjs): `pnpm dev`. A pack's files are
+// never stored here; they stay in the GitHub repository the pack is registered from.
+// Accounts are Clerk's. Set with `wrangler secret put <NAME>`, never committed:
+//   CLERK_SECRET_KEY       Clerk's backend key. Without it, nobody can sign in, and
+//                          submitting a pack is the only thing that needs an account.
+//   CLERK_PUBLISHABLE_KEY  Clerk's frontend key, which the session handshake needs.
+// For local dev, put them in apps/web/.dev.vars (gitignored) to try the real sign-in.
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agentcut-web",
+  "main": "src/index.tsx",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+  "vars": {
+    // "1" signs every visitor in as a local identity, so a checkout never asks anybody to
+    // sign in. Never "1" in production.
+    "DEV_LOGIN": "0"
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      // Replace with the id `wrangler hyperdrive create agentcut` prints before the first
+      // deploy (README → Deploy). Locally the binding reads its connection string from
+      // CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE, which scripts/dev.mjs and
+      // the tests set; nothing here is used.
+      "id": "00000000000000000000000000000000"
+    }
+  ],
+  "observability": { "enabled": true }
+}

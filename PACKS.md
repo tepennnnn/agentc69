@@ -1,0 +1,306 @@
+# Packs
+
+A pack is what travels between people: templates, rules, glossary entries, assets and
+quick actions that belong together. It is a folder — servable from any static host —
+with a manifest:
+
+```
+streamer-kit/
+  pack.json
+  templates/stream-look.json
+  rules/gaming.json
+  rules/gaming.md          # a rule's promptFile, beside it
+  assets/a_1234abcd.mp4    # named in pack.json with its kind and the id it had
+  STYLE.md                 # the style guide: how videos in this pack are made
+  examples/reference.mp4   # reference videos and pictures
+  review.json              # what a finished video in this pack must be true of
+  images/cover.jpg         # the pictures people choose it by: a cover and screenshots
+```
+
+`pack.json`:
+
+```json
+{
+  "id": "streamer-kit", "name": "Streamer kit", "version": "1.0.0", "author": "pasho",
+  "description": "Gameplay clips with a sting at the end.",
+  "templates": ["stream-look"],
+  "rules": ["gaming"],
+  "glossary": [{ "term": "Deska", "aliases": ["desk app"], "note": "the app" }],
+  "assets": [{ "file": "assets/a_1234abcd.mp4", "kind": "video", "name": "sting.mp4", "id": "a_1234abcd" }],
+  "quickActions": [{ "label": "Stream recap", "text": "Cut {selection} into a recap." }],
+  "cover": "images/cover.jpg",
+  "screenshots": ["images/the-comment.jpg", "images/the-end-card.jpg"]
+}
+```
+
+Templates and rules are data. The only code a pack may carry is a recipe (below), which
+runs at edit time once you trust it. Templates are the same documents as in `workspace/templates/`
+(a sparse `extends` document travels sparse); rules are the same as in `workspace/rules/`.
+
+## Style guide and references
+
+A template holds the mechanics of a video — where the hook sits, how the captions read,
+what is cut. It cannot hold the judgement: who the videos are for, what a good clip is,
+how the hooks sound, what the channel never does. That is `STYLE.md`, a page of prose
+the pack carries, with `examples/` beside it: reference videos and pictures, each with a
+note on what to take from it.
+
+```json
+"style": "STYLE.md",
+"examples": [{ "file": "examples/git-worktrees.mp4", "kind": "video", "title": "Git worktrees",
+               "note": "The hook is the topic in two words, only at the start." }]
+```
+
+- **Who reads it.** The clip-selection agent, which is where the judgement matters most,
+  and the editing agent. Both get it before the owner's preferences, and are told the
+  preferences win where the two disagree. An agent cannot watch a video, so a video
+  reference is read as a sheet of eight stills taken across it (`contactSheet`), stamped
+  with their times, beside the note.
+- **Which guide a video uses.** The project's own choice (**Video → Rules and
+  preferences → Preferences**, or `style.choose`); else the pack that owns the template
+  the video is made in; else the only installed pack with a guide. Two packs with guides
+  and nothing to choose between them is none, and `style.active` says so: two voices in
+  one prompt contradict each other.
+- **Why it is not called SOUL.md.** OpenClaw and Hermes give the *agent* a soul — who the
+  assistant on your computer is. Here the agent stays the same and the channel changes;
+  what changes is the style guide it edits to.
+- **Trust.** The guide is the one thing in a pack that speaks to the agent directly, so
+  it is held to 4000 characters and scanned for lines that only make sense as an attack —
+  "ignore previous instructions", a credential, a command to run, "delete the project".
+  A pack whose guide fails the scan is refused whole, before anything is copied, and the
+  import preview shows the guide in full. Saving one by hand is scanned the same way.
+- **Editing.** **Settings → Packs → the pack's page → Style guide and references**, or `packs.style.get`,
+  `packs.style.set`, `packs.examples.add`, `packs.examples.update`,
+  `packs.examples.remove`. An installed pack keeps them in `workspace/packs/<id>/`;
+  `packs.export` with `stylePack` writes them into the exported folder.
+
+## Pictures
+
+A pack is chosen by what it makes, so it can carry pictures of it: a `cover`, which the
+marketplace card, the pack's marketplace page, the studio's marketplace list and the import
+preview all lead with, and up to eight `screenshots` after it. Each is a png, jpg, webp or
+gif inside the pack, at most 5 MB; the cover shows at 16:9, and a screenshot keeps its own
+shape, so a vertical short stays vertical. They are for people, not for the agents — the
+references above are what the agents read.
+
+- **Where they come from.** A frame of a video the pack made, never a mock-up. The ones in
+  `packs/` are stills of real renders of each pack's own template.
+- **Installing.** They are copied into `workspace/packs/<id>/images/`, named by their role
+  (`cover.jpg`, `screenshot-1.jpg`, …) so two `1.png` from different folders cannot collide,
+  and read before anything is written: one over the limit installs nothing.
+- **Editing.** **Settings → Packs → the pack's page → Pictures**, or `packs.images.get`,
+  `packs.images.add` (`as: "cover"` replaces the cover; otherwise one more screenshot) and
+  `packs.images.remove`. `packs.export` with `stylePack` carries them.
+- **The marketplace** checks them like every other file the manifest names, refuses one
+  over 5 MB, and serves them straight from GitHub at the pinned commit.
+
+## The ones that ship
+
+`packs/` in this repository holds two, and each is a pack like any other — a folder with a
+`pack.json`, read by path, shown before it is installed, removable afterwards:
+
+```
+Settings → Packs → Import a pack → packs/news-desk → Read it
+Settings → Packs → Import a pack → packs/stream-shorts → Read it
+Settings → Packs → Import a pack → packs/showcase → Read it
+```
+
+| Pack | For | Carries |
+| --- | --- | --- |
+| `news-desk` | One take about one story, tightened into a video | `news-desk-daily`, which builds on the built-in `news-desk` with a stall list in English and Spanish, and three rules: a news take is edited as one, somebody else's clip runs whole, the sponsor read stays whole |
+| `stream-shorts` | Vertical shorts out of a screen-share stream | `stream-shorts-clip`, which builds on the built-in `stream-short`, keeps the hook up throughout, pops the chat message the clip answers in over a blurred frame while it is read out (`comment.style: "pop"`) and cuts stalls and retakes, and three rules: show the comment as it is read, end on your card, nothing covers the screen |
+| `showcase` | A long model comparison out of a stream: news, the same prompt on both, results side by side, verdict | `showcase-comparison`, which builds on the built-in `news-desk`; a style guide for what stays and what goes (anything the video later contradicts, a failed run, the chat during the wait); a review with the questions that catch those; a CC0 dramatic bed; and three recipes — `teaser`, `camera-intro`, `jump-card` — that build the opening |
+
+What they carry that a template cannot is `STYLE.md` — what a good one *is*, what comes out
+of a recording and what has to stay — which the selection agent reads before it decides
+anything, and `review.json` beside it: the part of that judgement with a number on it
+(length, the longest pause left in, captions crossing the seam) and the part that has to be
+asked (does it open on the message it answers; is the whole video about one story). Neither ships an asset, so the card at the end is yours: the `endcard` slot is
+empty until you fill it, and a clip with nothing in it ends on the last word rather than on
+somebody else's sting.
+
+Neither of the first two is code. The passes they switch on (`rhythm.filler`, `rhythm.retake`)
+ship with the app; a pack is what decides where they belong, and says why. `showcase` is the
+first to carry recipes. All three are installed from the repository by the tests — and
+`showcase`'s recipes are trusted and run there against a real video — so a folder we point
+people at cannot quietly stop working.
+
+## Recipes: code in a pack
+
+Some videos need more than a template can say. The model-comparison video opens with a
+teaser cut from moments later in it, dressed as a trailer; the greeting starts on the
+camera full screen and settles into its corner; at 25 seconds a card tells the viewer the
+minute the test starts. None of that is a knob on a template, and each video has its own
+moments and its own minute. So a pack may carry **recipes**: code that builds parts of a
+video the way the owner would by hand, and can be run again on the next one.
+
+```json
+"recipes": [
+  { "id": "jump-card", "label": "Aviso: bríncate a la prueba", "file": "recipes/jump-card.mjs",
+    "description": "A lower third telling the viewer at what minute the test starts.",
+    "params": {
+      "target": { "type": "string", "required": true, "description": "The first shot of the test." },
+      "at": { "type": "number", "default": 25 }
+    } }
+],
+"recipeFiles": ["recipes/lib/showcase.mjs", "recipes/fonts/BebasNeue-Regular.ttf"]
+```
+
+A recipe is an ES module whose default export receives `ctx` and returns a summary:
+
+| `ctx.` | What |
+| --- | --- |
+| `params` | The declared parameters, resolved: given, else the default, coerced to their type. A missing required one is refused before anything runs. |
+| `call(request)` | One editor tool: `project.read`, `project.edit`, `assets.list`, `templates.list`, `templates.get`. Nothing else. |
+| `timeline(sequenceId?)` | Every item's start and length in output seconds, as the renderer places them (`sequenceFrames`), so a recipe never re-implements the timing. |
+| `upload(file, name)` | Put a file from the scratch folder in the library; returns the asset. |
+| `ffmpeg(args)` | ffmpeg in the scratch folder. Arguments name files there, without slashes. |
+| `pack` | `{ id, dir, assets }` — its folder, and its assets' ids on this machine. |
+| `scratch`, `fonts`, `log(text)` | The folder it may write, the font folders it may read, a line for the activity feed. |
+
+- **Edit-time only.** What a recipe makes is ordinary EDL written by `project.edit`:
+  it renders offline, it is undone with undo, and every part of it can be changed in the
+  editor afterwards. Nothing from a pack runs at render time (decision 44 stands for that).
+- **Idempotent by convention.** A recipe owns the items it creates by id (`sc-` in
+  `showcase`) and replaces them when run again, so running it after a change puts things
+  back in step instead of stacking a copy.
+- **Trust is a person's, and it is per hash.** Installing a pack trusts nothing. The pack's
+  page (**Settings → Packs → the pack → Recipes**) shows every file in full with the sha256
+  of all of them, and **Trust this code** records that hash; so does
+  `agentcut packs trust <id>`. There is no tool that trusts: an agent can run a trusted
+  recipe and cannot trust one. A re-import with the same bytes keeps the trust; one changed
+  byte asks again. Export carries the code and never the trust.
+- **Sandboxed.** A run is a child `node --permission` process: it reads its pack, its
+  scratch folder and the machine's font folders, writes only scratch, and has no network,
+  no child processes, no workers and an empty environment. Everything else goes back to
+  the host over IPC through the short list above.
+- **Where it runs.** **Video → Pack recipes** in the editor (a form from `params`, the draft
+  saved first), `packs.recipes.list` / `packs.recipes.run` for the agent and MCP, and
+  `agentcut packs run <projectId> <pack> <recipe> --param name=value`.
+
+## What correct looks like
+
+A template is what gets applied; it is not what gets verified. `STYLE.md` says what a good
+video is in prose, which an agent reads and has every reason to agree with. `review.json`
+is the third file: the part of that judgement that can be written as a number with a limit,
+or as a question with an answer that has to point somewhere.
+
+```json
+"review": "review.json",
+```
+
+```json
+{
+  "schema": 1,
+  "checks": [
+    { "id": "no-tail", "metric": "video.durationSec", "max": 62, "severity": "critical",
+      "fix": "Cut after the last sentence; the tag runs long." }
+  ],
+  "rubric": [
+    { "id": "chat-opens", "severity": "critical", "evidence": "timestamp",
+      "ask": "Does the clip open on the chat comment being answered?",
+      "fix": "Extend the head to the comment, or pick a clip that stands without one." }
+  ]
+}
+```
+
+- **The pack brings thresholds, not measurements.** `metric` names one entry in a catalogue
+  the host owns — length, cuts per minute, caption rate, whether the captions cross the
+  seam, and the seven things `style.audit` reads back out of an export's pixels. A pack
+  cannot lie about a number it did not take, and its code (recipes) edits rather than measures.
+- **What cannot be measured is asked.** A rubric item is answered with a timestamp, a
+  frame, an EDL field or a quote; an answer with nothing beside it counts as
+  "cannot tell", and on a critical item that is a finding rather than a pass.
+- **The examples are the evidence.** A rubric item can name one, and the contact sheet the
+  agent already reads is what it compares against.
+- **A pack is linted at import.** A metric the host cannot measure, or a critical check
+  with no `fix` sentence, is shown on the inspect page before anything is copied — the same
+  shape as the rule lint that says when a rule judges but does not act.
+- **Trust.** `ask` and `fix` are text from a stranger that reaches the agent, so they are
+  scanned like `STYLE.md` and a pack that fails is refused whole. Thresholds are numbers.
+
+- **Where it is read.** **Video → What correct looks like** in the editor, or `review.run`,
+  `review.criteria` and `review.waive` from an agent. A critical finding the project
+  already fails refuses an export until it is fixed or waived with a reason.
+- **Editing.** **Settings → Packs → the pack's page → What correct looks like**, or `packs.review.get` /
+  `packs.review.set`. `packs.export` carries the file out again.
+
+The metric catalogue, the artifact and the reasoning: [REVIEW.md](./REVIEW.md).
+
+## Import
+
+**Settings → Packs → Import a pack** takes a folder path or a URL to `pack.json` and shows
+everything the pack carries before anything is installed: template names, every rule
+with its full text, quick actions, assets, glossary. A template that builds on one this
+machine does not have — and that the pack does not bring either — is called out there,
+because installing it would be refused and the reason would arrive as a failure rather
+than as a warning. A pack from anyone else is untrusted
+text an agent will follow, which is why the rules are shown in full and marked.
+
+**Install** copies it in: assets into the library (source `pack:<id>`, ids remapped so
+templates and rules that name them keep working), templates and rules into the
+workspace, glossary terms merged, quick actions recorded. Existing user templates and
+rules with the same id are kept unless **Install and replace mine**. The workspace
+remembers the origin (`workspace/packs/<id>.json`: source, version, hash, what came in).
+Nothing stays linked: offline rendering keeps working and updates are a re-import.
+
+Removing a pack removes its templates and rules. Assets stay, because projects may use them.
+
+## What installing one is worth
+
+The whole path was run from nothing on a machine that had never seen the pack: an empty
+workspace, the pack read from a folder, a recording ingested and transcribed, clips chosen
+by the selection agent, the owner's rule judged to hold on each of them, executed the way
+a batch executes them, rendered, and read back out of the pixels. Three shorts, eighteen
+checks, none failed — each framed as the pack's template says, each holding the pack's
+hook across its body, each ending on the pack's own card at the loudness of the video in
+front of it. Nothing about the look was typed on that machine.
+
+Then again, from nothing, on a different recording: three more shorts, eighteen more
+checks, none failed. The agent judged the pack's rule to hold on every clip both times,
+which is what a rule written as a sentence is for.
+
+And a third time, on seven minutes of a second stream nothing in this workspace had seen:
+three shorts, twenty-one checks, none failed — the caption-margin check among them. The
+agent judged the rule to hold on all three again.
+
+## Export
+
+**Export** writes `workspace/exports/packs/<id>/` from what is in this workspace: chosen
+templates and rules, the glossary, chosen assets, quick actions. Serve that folder or send
+it as is, or submit it to the marketplace.
+
+## The marketplace
+
+Packs are found on the marketplace (`apps/web`, AGENT-FIRST.md row 156), and a listed pack
+is a GitHub repository: the marketplace keeps its metadata and the commit each version is
+pinned to, never its files. The `source` it hands out is
+`raw.githubusercontent.com/<owner>/<repo>/<sha>/<folder>`, a URL `packs.inspect` and
+`packs.import` already read, so a marketplace pack gets the same preview, the same
+untrusted recipes and the same copy into the workspace as a pack typed by hand.
+
+- **Find** — Settings → Packs → Import a pack lists the marketplace above the folder-or-URL
+  field; *Read it* fills in the pack's URL and shows the usual preview. The agent's tool is
+  `packs.search`, which returns each pack with that URL as `source`. In a terminal,
+  `agentcut packs search [text]`.
+- **Install** — the preview's Install button, `packs.import` with the `source`, or
+  `agentcut packs install <name>[@version]`.
+- **Submit** — push the folder Export wrote to a public GitHub repository, then give the
+  marketplace its address at `<market>/submit` (`agentcut packs submit` opens that page).
+  Submitting is the one thing that needs an account, and the account has to be the GitHub
+  one that owns the repository. The marketplace reads `pack.json` at the head of the
+  branch, checks it against the same schema the app imports with and that every file it
+  names is in the repository, and pins the commit. The first person to submit a name owns
+  it; a version, once registered, keeps its commit — a new version is a bumped `version`
+  in pack.json and *Check for updates* on the pack's page.
+
+Nothing on your machine holds a marketplace credential: installing is anonymous, and
+submitting happens in a browser. `AGENTCUT_MARKET` points a machine at another marketplace
+(a local `wrangler dev`, a staging deploy).
+
+## Tools
+
+`packs.list`, `packs.inspect`, `packs.import`, `packs.remove`, `packs.export`,
+`packs.images.get`, `packs.images.add`, `packs.images.remove`, `packs.recipes.list`, `packs.recipes.run`, `quickactions.list` — the same functions behind
+the panel, the agent and MCP. Trusting recipes is not among them on purpose; the terminal has
+`agentcut packs list | inspect | import | recipes | trust | untrust | run`.

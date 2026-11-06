@@ -1,0 +1,14 @@
+packages:
+  - apps/*
+  - packages/*
+
+# This clone includes its installed dependencies. Never auto-install on a run.
+verifyDepsBeforeRun: false
+
+allowBuilds:
+  '@parcel/watcher': set this to true or false
+  esbuild: true
+  ffmpeg-static: true
+  sharp: false
+  unrs-resolver: false
+  workerd: true
